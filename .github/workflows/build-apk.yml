@@ -28,7 +28,7 @@ jobs:
           mkdir -p signing-tools/lib
           BT="$(find "$ANDROID_HOME/build-tools" -maxdepth 1 -mindepth 1 -type d | sort -V | tail -1)"
           cp "$BT/apksigner" "$BT/zipalign" signing-tools/
-          cp "$BT/lib/apksigner.jar" signing-tools/lib/
+          cp "$BT/lib/apksigner.jar" signing-tools/lib/\n          find "$BT" -name "libc++.so" -exec cp {} signing-tools/ \\; -quit
       - uses: actions/upload-artifact@v4
         with:
           name: android-signing-tools
