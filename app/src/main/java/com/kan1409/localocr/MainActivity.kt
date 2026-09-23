@@ -1,6 +1,6 @@
 package com.kan1409.localocr
 
-import android.app.Activity
+import android.app.DownloadManager
 import android.content.*
 import android.graphics.BitmapFactory
 import android.net.Uri
@@ -9,29 +9,44 @@ import android.provider.MediaStore
 import android.text.method.ScrollingMovementMethod
 import android.view.View
 import android.widget.*
+import androidx.activity.ComponentActivity
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.lifecycle.lifecycleScope
 import com.google.ai.edge.litertlm.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
-import java.net.HttpURLConnection
-import java.net.URL
-import kotlin.concurrent.thread
 
-class MainActivity : Activity() {
+class MainActivity : ComponentActivity() {
  private lateinit var status:TextView; private lateinit var output:TextView; private lateinit var image:ImageView
  private lateinit var progress:ProgressBar; private lateinit var runButton:Button
  private var imageFile:File?=null; private var cameraUri:Uri?=null
- private val modelFile by lazy { File(filesDir,"Qwen2-VL-2B.litertlm") }
- private val modelUrl="https://huggingface.co/litert-community/Qwen2-VL-2B/resolve/main/Qwen2-VL-2B.litertlm?download=true"
+ private val modelFile by lazy { File(getExternalFilesDir(null) ?: filesDir,"Qwen2-VL-2B.litertlm") }
+ private val modelUrl="https://huggingface.co/litert-community/Qwen2-VL-2B/resolve/5a03c8597ec02ec3c84cde3f1fd043688396bde5/Qwen2-VL-2B.litertlm?download=true"
+ private val prefs by lazy { getSharedPreferences("localocr",MODE_PRIVATE) }
 
- override fun onCreate(b:Bundle?){super.onCreate(b);buildUi();refresh()}
+ private val pickImage=registerForActivityResult(ActivityResultContracts.PickVisualMedia()){it?.let(::loadImage)}
+ private val importModel=registerForActivityResult(ActivityResultContracts.OpenDocument()){it?.let(::importModel)}
+ private val exportModel=registerForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")){u->if(u!=null)exportModel(u)}
+ private val takePicture=registerForActivityResult(ActivityResultContracts.TakePicture()){ok->
+  val u=cameraUri
+  if(ok&&u!=null)loadImage(u) else if(u!=null)contentResolver.delete(u,null,null)
+  cameraUri=null
+ }
+
+ override fun onCreate(b:Bundle?){super.onCreate(b);buildUi();refresh();checkDownload()}
  private fun buildUi(){
   val root=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL;setPadding(32,48,32,32)}
   val title=TextView(this).apply{text="LocalOCR";textSize=28f}
   status=TextView(this).apply{textSize=14f;setPadding(0,16,0,12)}
   progress=ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal).apply{max=100;visibility=View.GONE}
-  val download=Button(this).apply{text="Download / resume model (~1.78 GB)";setOnClickListener{downloadModel()}}
-  val importModel=Button(this).apply{text="Import existing .litertlm model";setOnClickListener{startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply{type="application/octet-stream";addCategory(Intent.CATEGORY_OPENABLE)},12)}}
+  val download=Button(this).apply{text="Download model (~1.78 GB)";setOnClickListener{downloadModel()}}
+  val import=Button(this).apply{text="Import existing .litertlm";setOnClickListener{importModel.launch(arrayOf("application/octet-stream","*/*"))}}
+  val export=Button(this).apply{text="Backup model";setOnClickListener{if(modelReady())exportModel.launch(modelFile.name) else Toast.makeText(this@MainActivity,"Model not ready",Toast.LENGTH_SHORT).show()}}
   val row=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL}
-  val gallery=Button(this).apply{text="Gallery";setOnClickListener{startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply{type="image/*";addCategory(Intent.CATEGORY_OPENABLE)},10)}}
+  val gallery=Button(this).apply{text="Gallery";setOnClickListener{pickImage.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))}}
   val camera=Button(this).apply{text="Camera";setOnClickListener{openCamera()}}
   row.addView(gallery,LinearLayout.LayoutParams(0,-2,1f));row.addView(camera,LinearLayout.LayoutParams(0,-2,1f))
   image=ImageView(this).apply{adjustViewBounds=true;scaleType=ImageView.ScaleType.CENTER_INSIDE;minimumHeight=280}
@@ -41,40 +56,60 @@ class MainActivity : Activity() {
   val copy=Button(this).apply{text="Copy";setOnClickListener{(getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager).setPrimaryClip(ClipData.newPlainText("OCR",output.text));Toast.makeText(this@MainActivity,"Copied",Toast.LENGTH_SHORT).show()}}
   val share=Button(this).apply{text="Share";setOnClickListener{startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply{type="text/plain";putExtra(Intent.EXTRA_TEXT,output.text.toString())},"Share OCR text"))}}
   actions.addView(copy,LinearLayout.LayoutParams(0,-2,1f));actions.addView(share,LinearLayout.LayoutParams(0,-2,1f))
-  root.addView(title);root.addView(status);root.addView(progress);root.addView(download);root.addView(importModel);root.addView(row);root.addView(image);root.addView(runButton);root.addView(output);root.addView(actions)
+  listOf(title,status,progress,download,import,export,row,image,runButton,output,actions).forEach(root::addView)
   setContentView(ScrollView(this).apply{addView(root)})
  }
- private fun refresh(){status.text=if(modelFile.exists()&&modelFile.length()>1_000_000_000L)"Model ready • "+(modelFile.length()/1024/1024)+" MB • OCR runs offline" else "Model not downloaded yet. First setup needs internet once.";runButton.isEnabled=imageFile!=null&&modelFile.exists()}
+ private fun modelReady()=modelFile.exists()&&modelFile.length()>1_700_000_000L
+ private fun refresh(){status.text=if(modelReady())"Model ready • "+(modelFile.length()/1024/1024)+" MB • OCR runs offline" else "Model not ready. Download once or import a backup.";runButton.isEnabled=imageFile!=null&&modelReady()}
  private fun downloadModel(){
-  if(modelFile.exists()&&modelFile.length()>1_000_000_000L){refresh();return}
-  progress.visibility=View.VISIBLE;status.text="Downloading model… keep the app open."
-  thread{try{
-   val part=File(filesDir,modelFile.name+".part");val existing=part.length();val c=URL(modelUrl).openConnection() as HttpURLConnection
-   c.instanceFollowRedirects=true;c.connectTimeout=20000;c.readTimeout=30000;if(existing>0)c.setRequestProperty("Range","bytes=$existing-");c.connect()
-   val resumed=existing>0&&c.responseCode==HttpURLConnection.HTTP_PARTIAL
-   val base=if(resumed)existing else 0L;if(!resumed&&existing>0)part.delete()
-   val remaining=c.contentLengthLong;val total=if(remaining>0)base+remaining else -1L
-   val usable=filesDir.usableSpace;if(remaining>0&&usable<remaining+256L*1024*1024)throw IllegalStateException("Not enough free storage")
-   c.inputStream.use{input->java.io.FileOutputStream(part,resumed).use{out->val buf=ByteArray(1024*1024);var done=base;while(true){val n=input.read(buf);if(n<0)break;out.write(buf,0,n);done+=n;if(total>0)runOnUiThread{progress.progress=((done*100)/total).toInt();status.text="Downloading… "+(done/1024/1024)+" / "+(total/1024/1024)+" MB"}}}}
-   if(!part.renameTo(modelFile)){part.copyTo(modelFile,true);part.delete()};runOnUiThread{progress.visibility=View.GONE;refresh()}
-  }catch(e:Exception){runOnUiThread{progress.visibility=View.GONE;status.text="Download failed: "+e.message}}}
+  if(modelReady()){refresh();return}
+  val dm=getSystemService(DOWNLOAD_SERVICE) as DownloadManager
+  if(modelFile.exists())modelFile.delete()
+  val req=DownloadManager.Request(Uri.parse(modelUrl)).setTitle("LocalOCR model").setDescription("Qwen2-VL-2B").setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED).setDestinationUri(Uri.fromFile(modelFile))
+  val id=dm.enqueue(req);prefs.edit().putLong("download_id",id).apply();status.text="Model download started in Android Download Manager.";progress.visibility=View.VISIBLE;checkDownload()
  }
- private fun openCamera(){val v=ContentValues().apply{put(MediaStore.Images.Media.DISPLAY_NAME,"localocr_"+System.currentTimeMillis()+".jpg");put(MediaStore.Images.Media.MIME_TYPE,"image/jpeg")};cameraUri=contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI,v);startActivityForResult(Intent(MediaStore.ACTION_IMAGE_CAPTURE).apply{putExtra(MediaStore.EXTRA_OUTPUT,cameraUri)},11)}
- override fun onActivityResult(r:Int,c:Int,d:Intent?){super.onActivityResult(r,c,d);if(c!=RESULT_OK)return;if(r==12){d?.data?.let{importModel(it)};return};val u=if(r==10)d?.data else cameraUri;if(u!=null)loadImage(u)}
- private fun importModel(u:Uri){progress.visibility=View.VISIBLE;status.text="Importing model…";thread{try{val part=File(filesDir,modelFile.name+".import");contentResolver.openInputStream(u)!!.use{a->part.outputStream().use{a.copyTo(it)}};if(part.length()<1_000_000_000L)throw IllegalArgumentException("Selected file is too small to be the model");if(!part.renameTo(modelFile)){part.copyTo(modelFile,true);part.delete()};runOnUiThread{progress.visibility=View.GONE;refresh()}}catch(e:Exception){runOnUiThread{progress.visibility=View.GONE;status.text="Import failed: "+e.message}}}}
- private fun loadImage(u:Uri){try{val f=File(cacheDir,"ocr_input_"+System.currentTimeMillis()+".img");contentResolver.openInputStream(u)!!.use{a->f.outputStream().use{a.copyTo(it)}};imageFile=f;val o=BitmapFactory.Options().apply{inJustDecodeBounds=true};BitmapFactory.decodeFile(f.absolutePath,o);var s=1;while(o.outWidth/s>1600||o.outHeight/s>1600)s*=2;image.setImageBitmap(BitmapFactory.decodeFile(f.absolutePath,BitmapFactory.Options().apply{inSampleSize=s}));output.text="";refresh()}catch(e:Exception){status.text="Image error: "+e.message}}
- private fun runOcr(){
-  val input=imageFile?:return;if(!modelFile.exists())return;runButton.isEnabled=false;progress.visibility=View.VISIBLE;progress.isIndeterminate=true;output.text="";status.text="Loading local AI model…"
-  thread{var engine:Engine?=null;try{
-   Engine.setNativeMinLogSeverity(LogSeverity.ERROR)
-   engine=try{Engine(EngineConfig(modelPath=modelFile.absolutePath,backend=Backend.GPU(),visionBackend=Backend.GPU(),cacheDir=cacheDir.absolutePath,maxNumImages=1)).also{it.initialize()}}
-   catch(_:Throwable){Engine(EngineConfig(modelPath=modelFile.absolutePath,backend=Backend.CPU(),visionBackend=Backend.CPU(),cacheDir=cacheDir.absolutePath,maxNumImages=1)).also{it.initialize()}}
-   runOnUiThread{status.text="Reading image offline…"}
-   engine.createConversation().use{conv->
-    val p="Extract ALL visible text exactly as written. Preserve Arabic and English exactly. Do not translate, summarize, correct, explain, or invent. Preserve numbers, punctuation, line breaks, and reading order. For tables preserve rows and columns in Markdown. Return ONLY extracted text. If no text is visible, return [NO TEXT]."
-    val response=conv.sendMessage(Contents.of(Content.Text(p),Content.ImageFile(input.absolutePath)),maxOutputToken=2048)
-    runOnUiThread{output.text=response.toString();status.text="Done • local/offline inference"}
+ private fun checkDownload(){
+  val id=prefs.getLong("download_id",-1);if(id<0)return
+  val dm=getSystemService(DOWNLOAD_SERVICE) as DownloadManager
+  lifecycleScope.launch{
+   while(true){
+    val state=withContext(Dispatchers.IO){dm.query(DownloadManager.Query().setFilterById(id)).use{q->
+     if(!q.moveToFirst())return@use Triple(-1,0L,0L)
+     Triple(q.getInt(q.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS)),q.getLong(q.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR)),q.getLong(q.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES)))
+    }}
+    val (s,d,t)=state
+    if(t>0){progress.visibility=View.VISIBLE;progress.progress=((d*100)/t).toInt();status.text="Downloading model… "+d/1024/1024+" / "+t/1024/1024+" MB"}
+    if(s==DownloadManager.STATUS_SUCCESSFUL){prefs.edit().remove("download_id").apply();progress.visibility=View.GONE;refresh();break}
+    if(s==DownloadManager.STATUS_FAILED||s==-1){prefs.edit().remove("download_id").apply();progress.visibility=View.GONE;status.text="Model download failed. Retry to resume with Android Download Manager.";break}
+    kotlinx.coroutines.delay(1000)
    }
-  }catch(e:Throwable){runOnUiThread{output.text="";status.text="OCR failed: "+(e.message?:e.javaClass.simpleName)}}finally{try{engine?.close()}catch(_:Throwable){};runOnUiThread{progress.visibility=View.GONE;progress.isIndeterminate=false;runButton.isEnabled=true}}}
+  }
+ }
+ private fun openCamera(){
+  val v=ContentValues().apply{put(MediaStore.Images.Media.DISPLAY_NAME,"localocr_"+System.currentTimeMillis()+".jpg");put(MediaStore.Images.Media.MIME_TYPE,"image/jpeg")}
+  cameraUri=contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI,v)
+  cameraUri?.let(takePicture::launch) ?: run{status.text="Could not create camera image"}
+ }
+ private fun importModel(u:Uri){lifecycleScope.launch{progress.visibility=View.VISIBLE;status.text="Validating and importing model…";try{
+  withContext(Dispatchers.IO){val part=File(modelFile.parentFile,modelFile.name+".import");contentResolver.openInputStream(u)!!.use{a->part.outputStream().use{a.copyTo(it)}};require(part.length()>1_700_000_000L){"Selected file is too small to be Qwen2-VL-2B"};if(modelFile.exists())modelFile.delete();check(part.renameTo(modelFile)||run{part.copyTo(modelFile,true);part.delete();true})}
+  refresh()
+ }catch(e:Exception){status.text="Import failed: "+e.message}finally{progress.visibility=View.GONE}}}
+ private fun exportModel(u:Uri){lifecycleScope.launch{progress.visibility=View.VISIBLE;status.text="Backing up model…";try{withContext(Dispatchers.IO){contentResolver.openOutputStream(u,"w")!!.use{out->modelFile.inputStream().use{it.copyTo(out)}}};status.text="Model backup complete."}catch(e:Exception){status.text="Backup failed: "+e.message}finally{progress.visibility=View.GONE}}}
+ private fun loadImage(u:Uri){lifecycleScope.launch{try{val f=withContext(Dispatchers.IO){File(cacheDir,"ocr_input_"+System.currentTimeMillis()+".img").also{dst->contentResolver.openInputStream(u)!!.use{a->dst.outputStream().use{a.copyTo(it)}}}};imageFile=f;val o=BitmapFactory.Options().apply{inJustDecodeBounds=true};BitmapFactory.decodeFile(f.absolutePath,o);require(o.outWidth>0&&o.outHeight>0){"Unsupported image"};var s=1;while(o.outWidth/s>1600||o.outHeight/s>1600)s*=2;image.setImageBitmap(BitmapFactory.decodeFile(f.absolutePath,BitmapFactory.Options().apply{inSampleSize=s}));output.text="";refresh()}catch(e:Exception){status.text="Image error: "+e.message}}}
+ private fun runOcr(){
+  val input=imageFile?:return;if(!modelReady())return;runButton.isEnabled=false;progress.visibility=View.VISIBLE;progress.isIndeterminate=true;output.text="";status.text="Loading local AI model…"
+  lifecycleScope.launch{var engine:Engine?=null;try{
+   val result=withContext(Dispatchers.IO){
+    Engine.setNativeMinLogSeverity(LogSeverity.ERROR)
+    var gpuError:Throwable?=null
+    engine=try{Engine(EngineConfig(modelPath=modelFile.absolutePath,backend=Backend.GPU(),visionBackend=Backend.GPU(),cacheDir=cacheDir.absolutePath,maxNumImages=1,maxNumTokens=4096)).also{it.initialize()}}catch(e:Throwable){gpuError=e;null}
+    if(engine==null)engine=Engine(EngineConfig(modelPath=modelFile.absolutePath,backend=Backend.CPU(),visionBackend=Backend.CPU(),cacheDir=cacheDir.absolutePath,maxNumImages=1,maxNumTokens=4096)).also{try{it.initialize()}catch(cpu:Throwable){cpu.addSuppressed(gpuError);throw cpu}}
+    engine!!.createConversation().use{conv->
+     val p="Extract ALL visible text exactly as written. Preserve Arabic and English exactly. Do not translate, summarize, correct, explain, or invent. Preserve numbers, punctuation, line breaks, and reading order. For tables preserve rows and columns in Markdown. Return ONLY extracted text. If no text is visible, return [NO TEXT]."
+     conv.sendMessage(Contents.of(Content.Text(p),Content.ImageFile(input.absolutePath)),maxOutputToken=4096).toString()
+    }
+   }
+   output.text=result;status.text="Done • local/offline inference"
+  }catch(e:Throwable){output.text="";status.text="OCR failed: "+(e.message?:e.javaClass.simpleName)}finally{withContext(Dispatchers.IO){try{engine?.close()}catch(_:Throwable){}};progress.visibility=View.GONE;progress.isIndeterminate=false;runButton.isEnabled=true}}
  }
 }
