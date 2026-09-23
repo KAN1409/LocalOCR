@@ -15,10 +15,10 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.13'
-      - name: Build debug APK
-        run: gradle :app:assembleDebug --stacktrace
+      - name: Build unsigned release APK
+        run: gradle :app:assembleRelease --stacktrace
       - uses: actions/upload-artifact@v4
         with:
-          name: LocalOCR-v0.1.0-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: LocalOCR-unsigned-release
+          path: app/build/outputs/apk/release/*.apk
           retention-days: 30
