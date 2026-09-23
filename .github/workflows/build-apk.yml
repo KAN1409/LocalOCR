@@ -22,3 +22,15 @@ jobs:
           name: LocalOCR-unsigned-release
           path: app/build/outputs/apk/release/*.apk
           retention-days: 30
+
+      - name: Collect Android signing tools
+        run: |
+          mkdir -p signing-tools/lib
+          BT="$(find "$ANDROID_HOME/build-tools" -maxdepth 1 -mindepth 1 -type d | sort -V | tail -1)"
+          cp "$BT/apksigner" "$BT/zipalign" signing-tools/
+          cp "$BT/lib/apksigner.jar" signing-tools/lib/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-signing-tools
+          path: signing-tools/
+          retention-days: 1
