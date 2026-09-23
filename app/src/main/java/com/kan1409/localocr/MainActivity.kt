@@ -28,7 +28,8 @@ class MainActivity : Activity() {
   val title=TextView(this).apply{text="LocalOCR";textSize=28f}
   status=TextView(this).apply{textSize=14f;setPadding(0,16,0,12)}
   progress=ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal).apply{max=100;visibility=View.GONE}
-  val download=Button(this).apply{text="Download / resume model (~1.78 GB)";setOnClickListener{downloadModel()}}\n  val importModel=Button(this).apply{text="Import existing .litertlm model";setOnClickListener{startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply{type="application/octet-stream";addCategory(Intent.CATEGORY_OPENABLE)},12)}}
+  val download=Button(this).apply{text="Download / resume model (~1.78 GB)";setOnClickListener{downloadModel()}}
+  val importModel=Button(this).apply{text="Import existing .litertlm model";setOnClickListener{startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply{type="application/octet-stream";addCategory(Intent.CATEGORY_OPENABLE)},12)}}
   val row=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL}
   val gallery=Button(this).apply{text="Gallery";setOnClickListener{startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply{type="image/*";addCategory(Intent.CATEGORY_OPENABLE)},10)}}
   val camera=Button(this).apply{text="Camera";setOnClickListener{openCamera()}}
@@ -54,7 +55,7 @@ class MainActivity : Activity() {
    val base=if(resumed)existing else 0L;if(!resumed&&existing>0)part.delete()
    val remaining=c.contentLengthLong;val total=if(remaining>0)base+remaining else -1L
    val usable=filesDir.usableSpace;if(remaining>0&&usable<remaining+256L*1024*1024)throw IllegalStateException("Not enough free storage")
-   c.inputStream.use{input->part.outputStream(resumed).use{out->val buf=ByteArray(1024*1024);var done=base;while(true){val n=input.read(buf);if(n<0)break;out.write(buf,0,n);done+=n;if(total>0)runOnUiThread{progress.progress=((done*100)/total).toInt();status.text="Downloading… "+(done/1024/1024)+" / "+(total/1024/1024)+" MB"}}}}
+   c.inputStream.use{input->java.io.FileOutputStream(part,resumed).use{out->val buf=ByteArray(1024*1024);var done=base;while(true){val n=input.read(buf);if(n<0)break;out.write(buf,0,n);done+=n;if(total>0)runOnUiThread{progress.progress=((done*100)/total).toInt();status.text="Downloading… "+(done/1024/1024)+" / "+(total/1024/1024)+" MB"}}}}
    if(!part.renameTo(modelFile)){part.copyTo(modelFile,true);part.delete()};runOnUiThread{progress.visibility=View.GONE;refresh()}
   }catch(e:Exception){runOnUiThread{progress.visibility=View.GONE;status.text="Download failed: "+e.message}}}
  }
