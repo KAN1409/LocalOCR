@@ -97,7 +97,7 @@ class MainActivity : ComponentActivity() {
   refresh()
  }catch(e:Exception){status.text="Import failed: "+e.message}finally{progress.visibility=View.GONE}}}
  private fun exportModel(u:Uri){lifecycleScope.launch{progress.visibility=View.VISIBLE;status.text="Backing up model…";try{withContext(Dispatchers.IO){contentResolver.openOutputStream(u,"w")!!.use{out->modelFile.inputStream().use{it.copyTo(out)}}};status.text="Model backup complete."}catch(e:Exception){status.text="Backup failed: "+e.message}finally{progress.visibility=View.GONE}}}
- private fun loadImage(u:Uri){lifecycleScope.launch{try{val f=withContext(Dispatchers.IO){File(cacheDir,"ocr_input_"+System.currentTimeMillis()+".img").also{dst->contentResolver.openInputStream(u)!!.use{a->dst.outputStream().use{a.copyTo(it)}}}};imageFile=f;val o=BitmapFactory.Options().apply{inJustDecodeBounds=true};BitmapFactory.decodeFile(f.absolutePath,o);require(o.outWidth>0&&o.outHeight>0){"Unsupported image"};var s=1;while(o.outWidth/s>1600||o.outHeight/s>1600)s*=2;image.setImageBitmap(BitmapFactory.decodeFile(f.absolutePath,BitmapFactory.Options().apply{inSampleSize=s}));output.text="";refresh()}catch(e:Exception){status.text="Image error: "+e.message}}}
+ private fun loadImage(u:Uri){lifecycleScope.launch{try{val f=withContext(Dispatchers.IO){File(cacheDir,"ocr_input_"+System.currentTimeMillis()+".png").also{dst->contentResolver.openInputStream(u)!!.use{a->dst.outputStream().use{a.copyTo(it)}}}};imageFile=f;val o=BitmapFactory.Options().apply{inJustDecodeBounds=true};BitmapFactory.decodeFile(f.absolutePath,o);require(o.outWidth>0&&o.outHeight>0){"Unsupported image"};var s=1;while(o.outWidth/s>2400||o.outHeight/s>2400)s*=2;image.setImageBitmap(BitmapFactory.decodeFile(f.absolutePath,BitmapFactory.Options().apply{inSampleSize=s}));output.text="";refresh()}catch(e:Exception){status.text="Image error: "+e.message}}}
  private fun setStage(message:String){runOnUiThread{status.text=message}}
  private fun shortError(t:Throwable)=buildString{
   append(t.javaClass.simpleName);t.message?.let{append(": ").append(it)}
@@ -141,7 +141,7 @@ class MainActivity : ComponentActivity() {
      }
      setStage("Model loaded • processing image…")
      engine!!.createConversation().use{conv->
-      val p="Extract ALL visible text exactly as written. Preserve Arabic and English exactly. Do not translate, summarize, correct, explain, or invent. Preserve numbers, punctuation, line breaks, and reading order. For tables preserve rows and columns in Markdown. Return ONLY extracted text. If no text is visible, return [NO TEXT]."
+      val p="Extract ALL visible text exactly as written. Preserve Arabic and English exactly. Do not translate, summarize, correct, explain, or invent. Preserve numbers, punctuation, line breaks, and reading order. For tables preserve rows and columns in Markdown. Inspect the entire image carefully from top to bottom and do not omit small, low-contrast, mixed-direction, or partially visible text. Arabic and English are equally important: transcribe BOTH languages, including code-switched lines. Return ONLY extracted text. If no text is visible, return [NO TEXT]."
       setStage("Generating OCR text…")
       conv.sendMessage(Contents.of(Content.Text(p),Content.ImageFile(input.absolutePath)),maxOutputToken=4096).toString()
      }
