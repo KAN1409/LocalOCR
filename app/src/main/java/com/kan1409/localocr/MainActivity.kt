@@ -17,6 +17,8 @@ import com.google.ai.edge.litertlm.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.withTimeout
 import java.io.File
 
 class MainActivity : ComponentActivity() {
@@ -96,20 +98,64 @@ class MainActivity : ComponentActivity() {
  }catch(e:Exception){status.text="Import failed: "+e.message}finally{progress.visibility=View.GONE}}}
  private fun exportModel(u:Uri){lifecycleScope.launch{progress.visibility=View.VISIBLE;status.text="Backing up model…";try{withContext(Dispatchers.IO){contentResolver.openOutputStream(u,"w")!!.use{out->modelFile.inputStream().use{it.copyTo(out)}}};status.text="Model backup complete."}catch(e:Exception){status.text="Backup failed: "+e.message}finally{progress.visibility=View.GONE}}}
  private fun loadImage(u:Uri){lifecycleScope.launch{try{val f=withContext(Dispatchers.IO){File(cacheDir,"ocr_input_"+System.currentTimeMillis()+".img").also{dst->contentResolver.openInputStream(u)!!.use{a->dst.outputStream().use{a.copyTo(it)}}}};imageFile=f;val o=BitmapFactory.Options().apply{inJustDecodeBounds=true};BitmapFactory.decodeFile(f.absolutePath,o);require(o.outWidth>0&&o.outHeight>0){"Unsupported image"};var s=1;while(o.outWidth/s>1600||o.outHeight/s>1600)s*=2;image.setImageBitmap(BitmapFactory.decodeFile(f.absolutePath,BitmapFactory.Options().apply{inSampleSize=s}));output.text="";refresh()}catch(e:Exception){status.text="Image error: "+e.message}}}
+ private fun setStage(message:String){runOnUiThread{status.text=message}}
+ private fun shortError(t:Throwable)=buildString{
+  append(t.javaClass.simpleName);t.message?.let{append(": ").append(it)}
+  var c=t.cause;var n=0;while(c!=null&&n++<3){append("\nCaused by ").append(c.javaClass.simpleName);c.message?.let{append(": ").append(it)};c=c.cause}
+ }
  private fun runOcr(){
-  val input=imageFile?:return;if(!modelReady())return;runButton.isEnabled=false;progress.visibility=View.VISIBLE;progress.isIndeterminate=true;output.text="";status.text="Loading local AI model…"
-  lifecycleScope.launch{var engine:Engine?=null;try{
-   val result=withContext(Dispatchers.IO){
-    Engine.setNativeMinLogSeverity(LogSeverity.ERROR)
-    var gpuError:Throwable?=null
-    engine=try{Engine(EngineConfig(modelPath=modelFile.absolutePath,backend=Backend.GPU(),visionBackend=Backend.GPU(),cacheDir=cacheDir.absolutePath,maxNumImages=1,maxNumTokens=4096)).also{it.initialize()}}catch(e:Throwable){gpuError=e;null}
-    if(engine==null)engine=Engine(EngineConfig(modelPath=modelFile.absolutePath,backend=Backend.CPU(),visionBackend=Backend.CPU(),cacheDir=cacheDir.absolutePath,maxNumImages=1,maxNumTokens=4096)).also{try{it.initialize()}catch(cpu:Throwable){cpu.addSuppressed(gpuError);throw cpu}}
-    engine!!.createConversation().use{conv->
-     val p="Extract ALL visible text exactly as written. Preserve Arabic and English exactly. Do not translate, summarize, correct, explain, or invent. Preserve numbers, punctuation, line breaks, and reading order. For tables preserve rows and columns in Markdown. Return ONLY extracted text. If no text is visible, return [NO TEXT]."
-     conv.sendMessage(Contents.of(Content.Text(p),Content.ImageFile(input.absolutePath)),maxOutputToken=4096).toString()
+  val input=imageFile?:return;if(!modelReady())return
+  runButton.isEnabled=false;progress.visibility=View.VISIBLE;progress.isIndeterminate=true;output.text=""
+  lifecycleScope.launch{
+   var engine:Engine?=null
+   val started=android.os.SystemClock.elapsedRealtime()
+   val diag=StringBuilder("LocalOCR runtime diagnostics\nModel: ").append(modelFile.length()/1024/1024).append(" MB\n")
+   try{
+    val result=withContext(Dispatchers.IO){
+     Engine.setNativeMinLogSeverity(LogSeverity.ERROR)
+     fun config(b:Backend)=EngineConfig(modelPath=modelFile.absolutePath,backend=b,visionBackend=b,audioBackend=Backend.CPU(),cacheDir=cacheDir.absolutePath,maxNumImages=1,maxNumTokens=4096)
+     var gpuError:Throwable?=null
+     setStage("Initializing GPU…")
+     val g0=android.os.SystemClock.elapsedRealtime()
+     engine=try{
+      val e=Engine(config(Backend.GPU()))
+      try{withTimeout(45_000){e.initialize()}}catch(t:Throwable){try{e.close()}catch(_:Throwable){};throw t}
+      diag.append("GPU init: OK ").append(android.os.SystemClock.elapsedRealtime()-g0).append(" ms\n");e
+     }catch(t:Throwable){
+      if(t is OutOfMemoryError)throw t
+      gpuError=t;diag.append("GPU init: FAILED ").append(android.os.SystemClock.elapsedRealtime()-g0).append(" ms\n").append(shortError(t)).append("\n")
+      null
+     }
+     if(engine==null){
+      setStage("GPU unavailable • initializing CPU fallback…")
+      val c0=android.os.SystemClock.elapsedRealtime()
+      engine=try{
+       val e=Engine(config(Backend.CPU()))
+       try{withTimeout(120_000){e.initialize()}}catch(t:Throwable){try{e.close()}catch(_:Throwable){};throw t}
+       diag.append("CPU multimodal init: OK ").append(android.os.SystemClock.elapsedRealtime()-c0).append(" ms\n");e
+      }catch(t:Throwable){
+       if(t is OutOfMemoryError)throw t
+       diag.append("CPU multimodal init: FAILED ").append(android.os.SystemClock.elapsedRealtime()-c0).append(" ms\n").append(shortError(t)).append("\n")
+       t.addSuppressed(gpuError);throw t
+      }
+     }
+     setStage("Model loaded • processing image…")
+     engine!!.createConversation().use{conv->
+      val p="Extract ALL visible text exactly as written. Preserve Arabic and English exactly. Do not translate, summarize, correct, explain, or invent. Preserve numbers, punctuation, line breaks, and reading order. For tables preserve rows and columns in Markdown. Return ONLY extracted text. If no text is visible, return [NO TEXT]."
+      setStage("Generating OCR text…")
+      conv.sendMessage(Contents.of(Content.Text(p),Content.ImageFile(input.absolutePath)),maxOutputToken=4096).toString()
+     }
     }
+    output.text=result
+    status.text="Done • local/offline • "+((android.os.SystemClock.elapsedRealtime()-started)/1000)+" s"
+   }catch(t:Throwable){
+    val msg=if(t is TimeoutCancellationException)"Initialization timed out" else "OCR failed"
+    diag.append(msg).append("\n").append(shortError(t)).append("\nTotal: ").append(android.os.SystemClock.elapsedRealtime()-started).append(" ms")
+    output.text=diag.toString();status.text="$msg • diagnostics below (Copy/Share)"
+   }finally{
+    withContext(Dispatchers.IO){try{engine?.close()}catch(_:Throwable){}}
+    progress.visibility=View.GONE;progress.isIndeterminate=false;runButton.isEnabled=true
    }
-   output.text=result;status.text="Done • local/offline inference"
-  }catch(e:Throwable){output.text="";status.text="OCR failed: "+(e.message?:e.javaClass.simpleName)}finally{withContext(Dispatchers.IO){try{engine?.close()}catch(_:Throwable){}};progress.visibility=View.GONE;progress.isIndeterminate=false;runButton.isEnabled=true}}
+  }
  }
 }
