@@ -53,7 +53,7 @@ class MainActivity : ComponentActivity() {
   val camera=Button(this).apply{text="Camera";setOnClickListener{openCamera()}}
   row.addView(gallery,LinearLayout.LayoutParams(0,-2,1f));row.addView(camera,LinearLayout.LayoutParams(0,-2,1f))
   image=ImageView(this).apply{adjustViewBounds=true;scaleType=ImageView.ScaleType.CENTER_INSIDE;minimumHeight=280}
-  runButton=Button(this).apply{text="Extract text (offline)";isEnabled=false;setOnClickListener{runOcr()}}
+  runButton=Button(this).apply{text="Extract text • PP-OCR Arabic (offline)";isEnabled=false;setOnClickListener{runOcr()}}
   output=TextView(this).apply{textSize=17f;setTextIsSelectable(true);movementMethod=ScrollingMovementMethod();textDirection=View.TEXT_DIRECTION_FIRST_STRONG;setPadding(16,20,16,20);minHeight=250}
   val actions=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL}
   val copy=Button(this).apply{text="Copy";setOnClickListener{(getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager).setPrimaryClip(ClipData.newPlainText("OCR",output.text));Toast.makeText(this@MainActivity,"Copied",Toast.LENGTH_SHORT).show()}}
@@ -138,60 +138,41 @@ class MainActivity : ComponentActivity() {
   var c=t.cause;var n=0;while(c!=null&&n++<3){append("\nCaused by ").append(c.javaClass.simpleName);c.message?.let{append(": ").append(it)};c=c.cause}
  }
  private fun runOcr(){
-  val input=imageFile?:return;if(!modelReady())return
+  val input=imageFile?:return
   runButton.isEnabled=false;progress.visibility=View.VISIBLE;progress.isIndeterminate=true;output.text=""
   lifecycleScope.launch{
-   var engine:Engine?=null
+   var ocr:com.paddle.ocr.PaddleOCR?=null
    val started=android.os.SystemClock.elapsedRealtime()
-   val diag=StringBuilder("LocalOCR runtime diagnostics\nModel: ").append(modelFile.length()/1024/1024).append(" MB\n")
    try{
-    val result=withContext(Dispatchers.IO){
-     Engine.setNativeMinLogSeverity(LogSeverity.ERROR)
-     fun config(b:Backend)=EngineConfig(modelPath=modelFile.absolutePath,backend=b,visionBackend=b,cacheDir=cacheDir.absolutePath,maxNumImages=1,maxNumTokens=4096)
-     var gpuError:Throwable?=null
-     setStage("Initializing GPU…")
-     val g0=android.os.SystemClock.elapsedRealtime()
-     engine=try{
-      val e=Engine(config(Backend.GPU()))
-      try{withTimeout(45_000){e.initialize()}}catch(t:Throwable){try{e.close()}catch(_:Throwable){};throw t}
-      diag.append("GPU init: OK ").append(android.os.SystemClock.elapsedRealtime()-g0).append(" ms\n");e
-     }catch(t:Throwable){
-      if(t is OutOfMemoryError)throw t
-      gpuError=t;diag.append("GPU init: FAILED ").append(android.os.SystemClock.elapsedRealtime()-g0).append(" ms\n").append(shortError(t)).append("\n")
-      null
-     }
-     if(engine==null){
-      setStage("GPU unavailable • initializing CPU fallback…")
-      val c0=android.os.SystemClock.elapsedRealtime()
-      engine=try{
-       val e=Engine(config(Backend.CPU()))
-       try{withTimeout(120_000){e.initialize()}}catch(t:Throwable){try{e.close()}catch(_:Throwable){};throw t}
-       diag.append("CPU multimodal init: OK ").append(android.os.SystemClock.elapsedRealtime()-c0).append(" ms\n");e
-      }catch(t:Throwable){
-       if(t is OutOfMemoryError)throw t
-       diag.append("CPU multimodal init: FAILED ").append(android.os.SystemClock.elapsedRealtime()-c0).append(" ms\n").append(shortError(t)).append("\n")
-       t.addSuppressed(gpuError);throw t
-      }
-     }
-     setStage("Model loaded • preparing detail tiles…")
-     val p="Extract ALL visible text exactly as written. Preserve Arabic and English exactly. Do not translate, summarize, correct, explain, or invent. Preserve numbers, punctuation, line breaks, and reading order. For tables preserve rows and columns in Markdown. Return ONLY extracted text. If no text is visible, return [NO TEXT]."
-     val tiles=buildOcrTiles(input);diag.append("OCR detail tiles: ").append(tiles.size).append("\n");val parts=mutableListOf<String>()
-     try{for((i,tile) in tiles.withIndex()){
-      setStage("OCR detail "+(i+1)+"/"+tiles.size+"…")
-      parts.add(engine!!.createConversation().use{conv->conv.sendMessage(Contents.of(Content.Text(p),Content.ImageFile(tile.absolutePath)),maxOutputToken=4096).toString()})
-     }}finally{tiles.filter{it!=input}.forEach{it.delete()}}
-     mergeTileText(parts)
-    }
-    output.text=result
-    status.text="Done • local/offline • "+((android.os.SystemClock.elapsedRealtime()-started)/1000)+" s"
+    setStage("Loading PP-OCRv5 Arabic…")
+    ocr=com.paddle.ocr.PaddleOCR.create(
+     context=this@MainActivity,
+     config=com.paddle.ocr.PaddleOCRConfig(
+      detThresh=0.3f,
+      detBoxThresh=0.6f,
+      recScoreThresh=0.0f,
+      recBatchSize=1
+     ),
+     engineConfig=com.paddle.ocr.EngineConfig(numThreads=4),
+     detModelAssetPath="models/det/inference.onnx",
+     recModelAssetPath="models/rec/inference.onnx",
+     recConfigAssetPath="models/rec/inference.yml"
+    )
+    setStage("Detecting + recognizing Arabic/English…")
+    val bytes=withContext(Dispatchers.IO){input.readBytes()}
+    val result=ocr!!.recognize(bytes)
+    val text=result.results.joinToString("\n"){it.text}.ifBlank{"[NO TEXT]"}
+    output.text=text
+    val avg=if(result.results.isEmpty())0f else result.results.map{it.confidence}.average().toFloat()
+    status.text="Done • PP-OCRv5 Arabic • "+result.lineCount+" lines • det "+result.detectionTimeMs+" ms • rec "+result.recognitionTimeMs+" ms • avg "+String.format("%.2f",avg)+" • total "+((android.os.SystemClock.elapsedRealtime()-started)/1000f)+" s"
    }catch(t:Throwable){
-    val msg=if(t is TimeoutCancellationException)"Initialization timed out" else "OCR failed"
-    diag.append(msg).append("\n").append(shortError(t)).append("\nTotal: ").append(android.os.SystemClock.elapsedRealtime()-started).append(" ms")
-    output.text=diag.toString();status.text="$msg • diagnostics below (Copy/Share)"
+    output.text="PP-OCR runtime diagnostics\n"+shortError(t)+"\nTotal: "+(android.os.SystemClock.elapsedRealtime()-started)+" ms"
+    status.text="PP-OCR failed • diagnostics below"
    }finally{
-    withContext(Dispatchers.IO){try{engine?.close()}catch(_:Throwable){}}
+    try{ocr?.release()}catch(_:Throwable){}
     progress.visibility=View.GONE;progress.isIndeterminate=false;runButton.isEnabled=true
    }
   }
  }
+
 }
