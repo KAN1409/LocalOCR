@@ -113,7 +113,7 @@ class MainActivity : ComponentActivity() {
    try{
     val result=withContext(Dispatchers.IO){
      Engine.setNativeMinLogSeverity(LogSeverity.ERROR)
-     fun config(b:Backend)=EngineConfig(modelPath=modelFile.absolutePath,backend=b,visionBackend=b,audioBackend=Backend.CPU(),cacheDir=cacheDir.absolutePath,maxNumImages=1,maxNumTokens=4096)
+     fun config(b:Backend)=EngineConfig(modelPath=modelFile.absolutePath,backend=b,visionBackend=b,cacheDir=cacheDir.absolutePath,maxNumImages=1,maxNumTokens=4096)
      var gpuError:Throwable?=null
      setStage("Initializing GPU…")
      val g0=android.os.SystemClock.elapsedRealtime()
