@@ -99,6 +99,39 @@ class MainActivity : ComponentActivity() {
  }catch(e:Exception){status.text="Import failed: "+e.message}finally{progress.visibility=View.GONE}}}
  private fun exportModel(u:Uri){lifecycleScope.launch{progress.visibility=View.VISIBLE;status.text="Backing up model…";try{withContext(Dispatchers.IO){contentResolver.openOutputStream(u,"w")!!.use{out->modelFile.inputStream().use{it.copyTo(out)}}};status.text="Model backup complete."}catch(e:Exception){status.text="Backup failed: "+e.message}finally{progress.visibility=View.GONE}}}
  private fun loadImage(u:Uri){lifecycleScope.launch{try{val f=withContext(Dispatchers.IO){val bitmap=contentResolver.openInputStream(u)!!.use{BitmapFactory.decodeStream(it)}?:error("Unsupported image");File(cacheDir,"ocr_input_"+System.currentTimeMillis()+".png").also{dst->dst.outputStream().use{bitmap.compress(Bitmap.CompressFormat.PNG,100,it)};bitmap.recycle()}};imageFile=f;val o=BitmapFactory.Options().apply{inJustDecodeBounds=true};BitmapFactory.decodeFile(f.absolutePath,o);require(o.outWidth>0&&o.outHeight>0){"Unsupported image"};var s=1;while(o.outWidth/s>1600||o.outHeight/s>1600)s*=2;image.setImageBitmap(BitmapFactory.decodeFile(f.absolutePath,BitmapFactory.Options().apply{inSampleSize=s}));output.text="";refresh()}catch(e:Exception){status.text="Image error: "+e.message}}}
+ private fun buildOcrTiles(input:File):List<File>{
+  val src=BitmapFactory.decodeFile(input.absolutePath)?:error("Could not decode OCR image")
+  try{
+   val portrait=src.height>=src.width
+   val longSide=if(portrait)src.height else src.width
+   val shortSide=if(portrait)src.width else src.height
+   if(longSide<=900)return listOf(input)
+   val tiles=mutableListOf<File>()
+   val window=minOf(longSide,maxOf(shortSide,(shortSide*1.20f).toInt()))
+   val step=maxOf(1,(window*0.85f).toInt())
+   var start=0;var index=0
+   while(true){
+    val end=minOf(longSide,start+window);val actualStart=maxOf(0,end-window)
+    val crop=if(portrait)Bitmap.createBitmap(src,0,actualStart,src.width,end-actualStart) else Bitmap.createBitmap(src,actualStart,0,end-actualStart,src.height)
+    val file=File(cacheDir,"ocr_tile_"+index+++".png")
+    file.outputStream().use{crop.compress(Bitmap.CompressFormat.PNG,100,it)}
+    crop.recycle();tiles.add(file)
+    if(end>=longSide)break
+    start+=step
+   }
+   return tiles
+  }finally{src.recycle()}
+ }
+ private fun mergeTileText(parts:List<String>):String{
+  val out=mutableListOf<String>()
+  for(part in parts)for(raw in part.replace("\r\n","\n").split('\n')){
+   val line=raw.trimEnd()
+   if(line.isBlank()||line=="[NO TEXT]")continue
+   if(out.takeLast(8).any{it.trim()==line.trim()})continue
+   out.add(line)
+  }
+  return if(out.isEmpty())"[NO TEXT]" else out.joinToString("\n")
+ }
  private fun setStage(message:String){runOnUiThread{status.text=message}}
  private fun shortError(t:Throwable)=buildString{
   append(t.javaClass.simpleName);t.message?.let{append(": ").append(it)}
@@ -140,12 +173,14 @@ class MainActivity : ComponentActivity() {
        t.addSuppressed(gpuError);throw t
       }
      }
-     setStage("Model loaded • processing image…")
-     engine!!.createConversation().use{conv->
-      val p="Extract ALL visible text exactly as written. Preserve Arabic and English exactly. Do not translate, summarize, correct, explain, or invent. Preserve numbers, punctuation, line breaks, and reading order. For tables preserve rows and columns in Markdown. Return ONLY extracted text. If no text is visible, return [NO TEXT]."
-      setStage("Generating OCR text…")
-      conv.sendMessage(Contents.of(Content.Text(p),Content.ImageFile(input.absolutePath)),maxOutputToken=4096).toString()
-     }
+     setStage("Model loaded • preparing detail tiles…")
+     val p="Extract ALL visible text exactly as written. Preserve Arabic and English exactly. Do not translate, summarize, correct, explain, or invent. Preserve numbers, punctuation, line breaks, and reading order. For tables preserve rows and columns in Markdown. Return ONLY extracted text. If no text is visible, return [NO TEXT]."
+     val tiles=buildOcrTiles(input);diag.append("OCR detail tiles: ").append(tiles.size).append("\n");val parts=mutableListOf<String>()
+     try{for((i,tile) in tiles.withIndex()){
+      setStage("OCR detail "+(i+1)+"/"+tiles.size+"…")
+      parts.add(engine!!.createConversation().use{conv->conv.sendMessage(Contents.of(Content.Text(p),Content.ImageFile(tile.absolutePath)),maxOutputToken=4096).toString()})
+     }}finally{tiles.filter{it!=input}.forEach{it.delete()}}
+     mergeTileText(parts)
     }
     output.text=result
     status.text="Done • local/offline • "+((android.os.SystemClock.elapsedRealtime()-started)/1000)+" s"
